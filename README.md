@@ -60,6 +60,101 @@ The three paths are deliberately separate: a theoretical benchmark should not si
 inherit replay mechanics, and an empirical fill model should not be presented as an exact
 replication of the paper.
 
+## Research figures
+
+The maintained figures use a fixed 1600×900 canvas, a `#050505` background and only
+white/gray marks. They are generated from the same package APIs used by the tests; no
+notebook-specific calculation is hidden behind the PNGs.
+
+### Exact GLFT inventory skew
+
+![GLFT optimal quote distance by inventory](docs/figures/glft-optimal-quote-distance.png)
+
+Each panel holds $T-t$ fixed and shows the two exact quote distances over
+$q\in[-5,5]$. The missing endpoint is intentional: at $q=Q$ the risk-increasing bid is
+disabled, and at $q=-Q$ the corresponding ask is disabled.
+
+```bash
+glft-lab plot-quotes \
+  --time-to-horizons 1.0,0.5,0.1 \
+  --output docs/figures/glft-optimal-quote-distance.png
+```
+
+### Causal execution replay
+
+![Causal BTCUSD PERP market replay](docs/figures/causal-market-replay.png)
+
+The price panel uses exchange-active quotes after placement/cancel latency rather than
+the strategy's pre-latency requests. The P&L panel is inverse BTC marked-to-mid P&L after
+the explicitly configured fees. The 1 bp maker and 5 bp taker inputs below are
+illustrative research settings, not a claim about a particular Binance fee tier.
+
+```bash
+glft-lab plot-replay \
+  --book data/BTCUSD_PERP-bookTicker-2024-09.csv \
+  --trades data/BTCUSD_PERP-aggTrades-2024-09.csv \
+  --symbol BTCUSD_PERP \
+  --start 2024-09-01T00:00:00Z \
+  --end 2024-09-01T00:10:00Z \
+  --tick-size 0.1 \
+  --accounting-model inverse \
+  --contract-multiplier 100 \
+  --trade-quantity-mode as_is \
+  --quantity-step 1 \
+  --order-size 1 \
+  --inventory-unit 1 \
+  --placement-latency-ms 5 \
+  --cancel-latency-ms 5 \
+  --maker-fee-bps 1 \
+  --taker-fee-bps 5 \
+  --max-events 100000 \
+  --pnl-unit BTC \
+  --output docs/figures/causal-market-replay.png
+```
+
+### Optional OOS fill calibration
+
+![Out-of-sample fill calibration](docs/figures/oos-fill-calibration.png)
+
+This optional reliability curve uses equal-frequency bins by side and 95% intervals from
+a passive-order episode-cluster bootstrap, so multiple intervals from one hypothetical
+order are not treated as independent Bernoulli trials. The checked-in image is
+deliberately labelled as a 30-minute September to October smoke test. Its labels remain
+counterfactual BBO fill opportunities with an approximate queue, not observed live-order
+fills or a full-month validation; dependence across neighboring episodes can still remain.
+
+```bash
+glft-lab episodes \
+  --book data/BTCUSD_PERP-bookTicker-2024-09.csv \
+  --trades data/BTCUSD_PERP-aggTrades-2024-09.csv \
+  --start 2024-09-01T00:00:00Z \
+  --end 2024-09-01T00:30:00Z \
+  --max-rows 0 \
+  --output artifacts/episodes-2024-09.jsonl \
+  --tick-size 0.1 \
+  --quantity-step 1 \
+  --decision-interval-ms 10000
+
+glft-lab episodes \
+  --book data/BTCUSD_PERP-bookTicker-2024-10.csv \
+  --trades data/BTCUSD_PERP-aggTrades-2024-10.csv \
+  --start 2024-10-01T00:00:00Z \
+  --end 2024-10-01T00:30:00Z \
+  --max-rows 0 \
+  --output artifacts/episodes-2024-10.jsonl \
+  --tick-size 0.1 \
+  --quantity-step 1 \
+  --decision-interval-ms 10000
+
+glft-lab plot-calibration \
+  --episodes artifacts/episodes-2024-09.jsonl artifacts/episodes-2024-10.jsonl \
+  --train-month 2024-09 \
+  --test-month 2024-10 \
+  --train-label 2024-09-01T00:00–00:30Z \
+  --test-label 2024-10-01T00:00–00:30Z \
+  --output docs/figures/oos-fill-calibration.png
+```
+
 ## Exact GLFT implementation
 
 For inventory states $q\in\{-Q,\ldots,Q\}$, the implementation uses

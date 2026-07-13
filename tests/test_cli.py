@@ -103,6 +103,19 @@ def test_benchmark_command_is_explicitly_theoretical_and_reproducible(
     assert first["simulation"]["steps"] == 2
 
 
+def test_plot_quotes_command_writes_a_site_ready_png(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    output = tmp_path / "quotes.png"
+
+    assert main(["plot-quotes", "--output", str(output)]) == 0
+    payload = _stdout_json(capsys)
+
+    assert payload["pixels"] == [1600, 900]
+    assert payload["time_to_horizons"] == [1.0, 0.5, 0.1]
+    assert output.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
 def test_replay_reports_bbo_scope_fills_inventory_pnl_and_markouts(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -142,6 +155,48 @@ def test_replay_reports_bbo_scope_fills_inventory_pnl_and_markouts(
     assert payload["fills"]["maker"] == 1
     assert payload["fills"]["total_fees"] == 0.0
     assert payload["performance"]["final_inventory"] == 1.0
+
+    figure = tmp_path / "replay.png"
+    assert (
+        main(
+            [
+                "plot-replay",
+                "--book",
+                str(book),
+                "--trades",
+                str(trades),
+                "--symbol",
+                "BTCUSD_PERP",
+                "--tick-size",
+                "0.1",
+                "--accounting-model",
+                "inverse",
+                "--contract-multiplier",
+                "100",
+                "--trade-quantity-mode",
+                "as_is",
+                "--quantity-step",
+                "1",
+                "--placement-latency-ms",
+                "5",
+                "--cancel-latency-ms",
+                "5",
+                "--maker-fee-bps",
+                "1",
+                "--taker-fee-bps",
+                "5",
+                "--pnl-unit",
+                "BTC",
+                "--no-liquidate",
+                "--output",
+                str(figure),
+            ]
+        )
+        == 0
+    )
+    plotted = _stdout_json(capsys)
+    assert plotted["accounting_model"] == "inverse"
+    assert figure.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
     assert payload["performance"]["max_absolute_inventory"] == 1.0
     assert payload["performance"]["net_pnl"] > 0
     assert payload["realized_markouts_by_horizon_seconds"]["1.0"]["count"] == 1
@@ -327,6 +382,30 @@ def test_walk_forward_supports_explicit_september_train_october_test(
     assert payload["folds"][0]["train_episodes"] == 12
     assert payload["folds"][0]["test_episodes"] == 12
     assert payload["residual_diagnostics"]["out_of_sample"] is True
+
+    figure = tmp_path / "calibration.png"
+    assert (
+        main(
+            [
+                "plot-calibration",
+                "--episodes",
+                str(path),
+                "--train-month",
+                "2024-09",
+                "--test-month",
+                "2024-10",
+                "--calibration-bins",
+                "3",
+                "--output",
+                str(figure),
+            ]
+        )
+        == 0
+    )
+    plotted = _stdout_json(capsys)
+    assert plotted["oos_intervals"] == 12
+    assert plotted["oos_fill_events"] == 4
+    assert figure.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 def test_arrival_diagnostics_streams_exact_interarrival_and_fano_formulas(

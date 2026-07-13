@@ -71,6 +71,9 @@ class GLFTReplayRun:
 
     replay: ReplayResult
     decisions: tuple[GLFTQuoteDecision, ...]
+    parameters: GLFTParameters
+    replay_config: ReplayConfig
+    inventory_unit: float
     market_event_count: int
     start_timestamp: float
     end_timestamp: float
@@ -452,6 +455,9 @@ def run_glft_replay(
     return GLFTReplayRun(
         replay=replay,
         decisions=tuple(policy.decisions),
+        parameters=parameters,
+        replay_config=replay_config,
+        inventory_unit=policy.inventory_unit,
         market_event_count=market_event_count,
         start_timestamp=start,
         end_timestamp=end,

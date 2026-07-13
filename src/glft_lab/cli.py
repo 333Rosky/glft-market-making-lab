@@ -41,7 +41,7 @@ from .replay import (
     Liquidity,
     ReplayConfig,
 )
-from .strategy import TradeQuantityMode, run_glft_replay
+from .strategy import GLFTReplayRun, TradeQuantityMode, run_glft_replay
 from .walkforward import walk_forward_monthly
 
 BBO_EPISODE_LABEL = (
@@ -193,7 +193,7 @@ def _market_rows(args: argparse.Namespace) -> Iterator[Any]:
     )
 
 
-def _replay(args: argparse.Namespace) -> None:
+def _run_replay(args: argparse.Namespace) -> tuple[GLFTReplayRun, GLFTParameters]:
     accounting_model = AccountingModel(args.accounting_model)
     if accounting_model is AccountingModel.INVERSE and args.contract_multiplier is None:
         raise ValueError("--contract-multiplier is required for inverse accounting")
@@ -232,6 +232,11 @@ def _replay(args: argparse.Namespace) -> None:
         max_events=args.max_events,
         trade_quantity_mode=TradeQuantityMode(args.trade_quantity_mode),
     )
+    return run, parameters
+
+
+def _replay(args: argparse.Namespace) -> None:
+    run, parameters = _run_replay(args)
     result = run.replay
     maker_fills = [fill for fill in result.fills if fill.liquidity is Liquidity.MAKER]
     taker_fills = [fill for fill in result.fills if fill.liquidity is Liquidity.TAKER]
@@ -288,6 +293,57 @@ def _replay(args: argparse.Namespace) -> None:
                 "total_fees": float(sum(fill.fee for fill in result.fills)),
             },
             "realized_markouts_by_horizon_seconds": _markout_summary(result.markouts),
+        }
+    )
+
+
+def _plot_quotes(args: argparse.Namespace) -> None:
+    from .figures import save_optimal_quote_distance_figure
+
+    parameters = GLFTParameters(
+        A=args.A,
+        k=args.k,
+        gamma=args.gamma,
+        sigma=args.sigma,
+        max_inventory=args.max_inventory,
+        mu=args.mu,
+    )
+    output = save_optimal_quote_distance_figure(
+        args.output,
+        parameters=parameters,
+        time_to_horizons=tuple(args.time_to_horizons),
+    )
+    _emit_json(
+        {
+            "figure": output,
+            "pixels": [1600, 900],
+            "parameters": parameters,
+            "time_to_horizons": args.time_to_horizons,
+            "boundary_policy": "risk-increasing side is absent at q = +/-Q",
+        }
+    )
+
+
+def _plot_replay(args: argparse.Namespace) -> None:
+    from .figures import save_causal_replay_figure
+
+    run, _ = _run_replay(args)
+    output = save_causal_replay_figure(
+        run,
+        args.output,
+        symbol=args.symbol,
+        pnl_unit=args.pnl_unit,
+    )
+    _emit_json(
+        {
+            "figure": output,
+            "pixels": [1600, 900],
+            "source_events": run.market_event_count,
+            "quote_decisions": len(run.decisions),
+            "fills": len(run.replay.fills),
+            "queue_model": run.replay.queue_model,
+            "accounting_model": run.replay.accounting_model,
+            "cash_unit": run.replay.cash_unit,
         }
     )
 
@@ -350,12 +406,13 @@ def _load_episodes(
         "exposure",
     )
     columns: dict[str, list[Any]] = {name: [] for name in required}
+    columns["episode_id"] = []
     optional: dict[str, list[Any]] = {
         "markout": [],
         "pnl": [],
         "inventory": [],
     }
-    for path in paths:
+    for file_index, path in enumerate(paths):
         with Path(path).open("r", encoding="utf-8") as handle:
             for line_number, line in enumerate(handle, start=1):
                 if not line.strip():
@@ -366,6 +423,7 @@ def _load_episodes(
                     raise ValueError(f"{path}:{line_number} missing fields: {', '.join(missing)}")
                 for name in required:
                     columns[name].append(row[name])
+                columns["episode_id"].append(f"{file_index}:{row.get('episode_id', line_number)}")
                 for name in optional:
                     optional[name].append(row.get(name))
                 if max_episodes is not None and len(columns["count"]) >= max_episodes:
@@ -455,7 +513,9 @@ def _select_rows(
     )
 
 
-def _walk_forward(args: argparse.Namespace) -> None:
+def _run_walk_forward(
+    args: argparse.Namespace,
+) -> tuple[Any, dict[str, np.ndarray], np.ndarray, bool]:
     data, count, exposure, trading = _load_episodes(
         args.episodes, _optional_limit(args.max_episodes)
     )
@@ -488,6 +548,11 @@ def _walk_forward(args: argparse.Namespace) -> None:
         inventory=trading["inventory"],
         max_residual_lag=args.max_residual_lag,
     )
+    return result, data, count, explicit_pair
+
+
+def _walk_forward(args: argparse.Namespace) -> None:
+    result, _, _, explicit_pair = _run_walk_forward(args)
     folds = [
         {
             "test_month": fold.test_month,
@@ -507,6 +572,39 @@ def _walk_forward(args: argparse.Namespace) -> None:
             "aggregate_oos_metrics": result.metrics,
             "residual_diagnostics": _clean_diagnostics(result.diagnostics),
             "hawkes_gate": result.hawkes_gate,
+        }
+    )
+
+
+def _plot_calibration(args: argparse.Namespace) -> None:
+    from .figures import save_oos_fill_calibration_figure
+
+    if args.train_month is None or args.test_month is None:
+        raise ValueError("plot-calibration requires --train-month and --test-month")
+    result, data, count, explicit_pair = _run_walk_forward(args)
+    if not explicit_pair:  # pragma: no cover - validated above
+        raise AssertionError("plot-calibration has no explicit train/test pair")
+    output = save_oos_fill_calibration_figure(
+        args.output,
+        probability=result.probability[result.oos_mask],
+        count=count[result.oos_mask],
+        side=data["side"][result.oos_mask],
+        cluster=data["episode_id"][result.oos_mask],
+        train_label=args.train_label or args.train_month,
+        test_label=args.test_label or args.test_month,
+        n_bins=args.calibration_bins,
+    )
+    _emit_json(
+        {
+            "figure": output,
+            "pixels": [1600, 900],
+            "train_month": args.train_month,
+            "test_month": args.test_month,
+            "train_label": args.train_label or args.train_month,
+            "test_label": args.test_label or args.test_month,
+            "oos_intervals": int(np.sum(result.oos_mask)),
+            "oos_fill_events": int(np.sum(count[result.oos_mask] > 0)),
+            "episode_scope": BBO_EPISODE_LABEL,
         }
     )
 
@@ -678,58 +776,43 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--seed", type=int, default=0)
     benchmark.set_defaults(handler=_benchmark)
 
+    plot_quotes = commands.add_parser(
+        "plot-quotes",
+        help="render exact GLFT quote distances by inventory",
+    )
+    plot_quotes.add_argument("--output", required=True)
+    plot_quotes.add_argument("--A", type=_positive_float, default=1.0)
+    plot_quotes.add_argument("--k", type=_positive_float, default=1.0)
+    plot_quotes.add_argument("--gamma", type=_positive_float, default=0.1)
+    plot_quotes.add_argument("--sigma", type=_non_negative_float, default=1.0)
+    plot_quotes.add_argument("--mu", type=float, default=0.0)
+    plot_quotes.add_argument("--max-inventory", type=_positive_int, default=5)
+    plot_quotes.add_argument(
+        "--time-to-horizons",
+        type=_comma_separated_positive,
+        default=(1.0, 0.5, 0.1),
+        metavar="SECONDS",
+    )
+    plot_quotes.set_defaults(handler=_plot_quotes)
+
     replay = commands.add_parser(
         "replay", help="replay Binance bookTicker/aggTrades with BBO queue approximation"
     )
-    _add_market_paths(replay)
-    replay.add_argument("--tick-size", type=_positive_float, required=True)
-    replay.add_argument(
-        "--accounting-model",
-        choices=tuple(model.value for model in AccountingModel),
-        required=True,
-    )
-    replay.add_argument(
-        "--contract-multiplier",
-        type=_positive_float,
-        help="required for inverse accounting; linear defaults to 1",
-    )
-    replay.add_argument(
-        "--trade-quantity-mode",
-        choices=tuple(mode.value for mode in TradeQuantityMode),
-        required=True,
-        help="use as_is for official COIN-M contract counts",
-    )
-    replay.add_argument("--initial-entry-price", type=_positive_float)
-    replay.add_argument(
-        "--quantity-step",
-        type=_positive_float,
-        help="contract-size step; inverse accounting defaults to 1",
-    )
-    replay.add_argument("--A", type=_positive_float, default=1.0)
-    replay.add_argument("--k", type=_positive_float, default=1.0)
-    replay.add_argument("--gamma", type=_positive_float, default=0.1)
-    replay.add_argument("--sigma", type=_non_negative_float, default=1.0)
-    replay.add_argument("--mu", type=float, default=0.0)
-    replay.add_argument("--max-inventory", type=_positive_int, default=5)
-    replay.add_argument("--horizon", type=_positive_float)
-    replay.add_argument("--order-size", type=_positive_float, default=1.0)
-    replay.add_argument("--inventory-unit", type=_positive_float)
-    replay.add_argument("--quote-interval", type=_non_negative_float, default=1.0)
-    replay.add_argument("--max-events", type=_positive_int, default=1_000_000)
-    replay.add_argument("--placement-latency-ms", type=_non_negative_float, default=0.0)
-    replay.add_argument("--cancel-latency-ms", type=_non_negative_float, default=0.0)
-    replay.add_argument("--maker-fee-bps", type=float, default=0.0)
-    replay.add_argument("--taker-fee-bps", type=float, default=0.0)
-    replay.add_argument("--cash", type=float, default=0.0)
-    replay.add_argument("--inventory", type=float, default=0.0)
-    replay.add_argument("--no-liquidate", action="store_true")
-    replay.add_argument(
-        "--markout-horizons",
-        type=_comma_separated_non_negative,
-        default=(1.0, 5.0, 30.0),
-        metavar="SECONDS",
-    )
+    _add_replay_arguments(replay)
     replay.set_defaults(handler=_replay)
+
+    plot_replay = commands.add_parser(
+        "plot-replay",
+        help="render synchronized causal replay prices, inventory and P&L",
+    )
+    _add_replay_arguments(plot_replay)
+    plot_replay.add_argument("--output", required=True)
+    plot_replay.add_argument("--symbol", required=True)
+    plot_replay.add_argument(
+        "--pnl-unit",
+        help="display unit for P&L; use BTC for BTCUSD_PERP inverse accounting",
+    )
+    plot_replay.set_defaults(handler=_plot_replay)
 
     episodes = commands.add_parser(
         "episodes",
@@ -769,14 +852,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="monthly OOS hazard evaluation (for example Sep train / Oct test)",
     )
     _add_episode_inputs(walk)
-    walk.add_argument("--train-month", metavar="YYYY-MM")
-    walk.add_argument("--test-month", metavar="YYYY-MM")
-    walk.add_argument("--mode", choices=("expanding", "rolling"), default="expanding")
-    walk.add_argument("--min-train-months", type=_positive_int, default=1)
-    walk.add_argument("--train-window-months", type=_positive_int)
-    walk.add_argument("--l2", type=_non_negative_float, default=1e-4)
-    walk.add_argument("--max-residual-lag", type=_positive_int, default=10)
+    _add_walk_forward_arguments(walk)
     walk.set_defaults(handler=_walk_forward)
+
+    plot_calibration = commands.add_parser(
+        "plot-calibration",
+        help="render bid/ask OOS fill calibration from monthly episodes",
+    )
+    _add_episode_inputs(plot_calibration)
+    _add_walk_forward_arguments(plot_calibration, require_pair=True)
+    plot_calibration.add_argument("--output", required=True)
+    plot_calibration.add_argument("--calibration-bins", type=_positive_int, default=10)
+    plot_calibration.add_argument("--train-label")
+    plot_calibration.add_argument("--test-label")
+    plot_calibration.set_defaults(handler=_plot_calibration)
 
     arrivals = commands.add_parser(
         "arrival-diagnostics",
@@ -803,11 +892,76 @@ def _add_market_paths(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_replay_arguments(parser: argparse.ArgumentParser) -> None:
+    _add_market_paths(parser)
+    parser.add_argument("--tick-size", type=_positive_float, required=True)
+    parser.add_argument(
+        "--accounting-model",
+        choices=tuple(model.value for model in AccountingModel),
+        required=True,
+    )
+    parser.add_argument(
+        "--contract-multiplier",
+        type=_positive_float,
+        help="required for inverse accounting; linear defaults to 1",
+    )
+    parser.add_argument(
+        "--trade-quantity-mode",
+        choices=tuple(mode.value for mode in TradeQuantityMode),
+        required=True,
+        help="use as_is for official COIN-M contract counts",
+    )
+    parser.add_argument("--initial-entry-price", type=_positive_float)
+    parser.add_argument(
+        "--quantity-step",
+        type=_positive_float,
+        help="contract-size step; inverse accounting defaults to 1",
+    )
+    parser.add_argument("--A", type=_positive_float, default=1.0)
+    parser.add_argument("--k", type=_positive_float, default=1.0)
+    parser.add_argument("--gamma", type=_positive_float, default=0.1)
+    parser.add_argument("--sigma", type=_non_negative_float, default=1.0)
+    parser.add_argument("--mu", type=float, default=0.0)
+    parser.add_argument("--max-inventory", type=_positive_int, default=5)
+    parser.add_argument("--horizon", type=_positive_float)
+    parser.add_argument("--order-size", type=_positive_float, default=1.0)
+    parser.add_argument("--inventory-unit", type=_positive_float)
+    parser.add_argument("--quote-interval", type=_non_negative_float, default=1.0)
+    parser.add_argument("--max-events", type=_positive_int, default=1_000_000)
+    parser.add_argument("--placement-latency-ms", type=_non_negative_float, default=0.0)
+    parser.add_argument("--cancel-latency-ms", type=_non_negative_float, default=0.0)
+    parser.add_argument("--maker-fee-bps", type=float, default=0.0)
+    parser.add_argument("--taker-fee-bps", type=float, default=0.0)
+    parser.add_argument("--cash", type=float, default=0.0)
+    parser.add_argument("--inventory", type=float, default=0.0)
+    parser.add_argument("--no-liquidate", action="store_true")
+    parser.add_argument(
+        "--markout-horizons",
+        type=_comma_separated_non_negative,
+        default=(1.0, 5.0, 30.0),
+        metavar="SECONDS",
+    )
+
+
 def _add_episode_inputs(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--episodes", nargs="+", required=True, help="JSONL episode files")
     parser.add_argument(
         "--max-episodes", type=_non_negative_int, default=0, help="0 means unlimited"
     )
+
+
+def _add_walk_forward_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    require_pair: bool = False,
+) -> None:
+    parser.add_argument("--train-month", metavar="YYYY-MM", required=require_pair)
+    parser.add_argument("--test-month", metavar="YYYY-MM", required=require_pair)
+    parser.add_argument("--mode", choices=("expanding", "rolling"), default="expanding")
+    parser.add_argument("--min-train-months", type=_positive_int, default=1)
+    parser.add_argument("--train-window-months", type=_positive_int)
+    parser.add_argument("--l2", type=_non_negative_float, default=1e-4)
+    parser.add_argument("--max-residual-lag", type=_positive_int, default=10)
 
 
 def _comma_separated_non_negative(value: str) -> tuple[float, ...]:
@@ -817,6 +971,16 @@ def _comma_separated_non_negative(value: str) -> tuple[float, ...]:
         raise argparse.ArgumentTypeError("expected comma-separated seconds") from exc
     if not parsed or any(not math.isfinite(item) or item < 0 for item in parsed):
         raise argparse.ArgumentTypeError("markout horizons must be non-negative")
+    return parsed
+
+
+def _comma_separated_positive(value: str) -> tuple[float, ...]:
+    try:
+        parsed = tuple(float(item) for item in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected comma-separated positive values") from exc
+    if not parsed or any(not math.isfinite(item) or item <= 0 for item in parsed):
+        raise argparse.ArgumentTypeError("time-to-horizons must be positive")
     return parsed
 
 
