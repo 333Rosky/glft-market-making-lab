@@ -1,0 +1,21 @@
+# Local environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Large local market data and generated outputs
+data/
+artifacts/
+output/
+
+# Editor and OS metadata
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
